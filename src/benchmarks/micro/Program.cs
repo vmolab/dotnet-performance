@@ -51,7 +51,8 @@ namespace MicroBenchmarks
                         exclusionFilterValue: exclusionFilterValue,
                         categoryExclusionFilterValue: categoryExclusionFilterValue,
                         getDiffableDisasm: getDiffableDisasm)
-                    .AddValidator(new NoWasmValidator(Categories.NoWASM)))
+                    .AddValidator(new NoWasmValidator(Categories.NoWASM))
+                    .WithOptions(ConfigOptions.DisableOptimizationsValidator))
                 .ToExitCode();
         }
     }
