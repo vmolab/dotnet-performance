@@ -6,9 +6,10 @@ import sys
 import os
 import shutil
 import subprocess
+import json
 from logging import getLogger
 from argparse import ArgumentParser
-from typing import List, Optional
+from typing import Optional
 from dotnet import CSharpProject, CSharpProjFile
 from shared import const
 from shared.crossgen import CrossgenArguments
@@ -93,7 +94,6 @@ class PreCommands:
         self.framework = args.framework
         self.runtime_identifier = args.runtime
         self.nativeaot = args.nativeaot
-        self.hybridglobalization = args.hybridglobalization
         self.msbuild = args.msbuild
         print(self.msbuild)
         self.msbuildstatic = args.msbuildstatic
@@ -123,7 +123,7 @@ class PreCommands:
             language: Optional[str] = None,
             no_https: bool = False,
             no_restore: bool = True,
-            extra_args: Optional[List[str]] = None):
+            extra_args: Optional[list[str]] = None):
         'makes a new app with the given template'
         self.project = CSharpProject.new(template=template,
                                  output_dir=output_dir,
@@ -158,10 +158,6 @@ class PreCommands:
                             dest='nativeaot',
                             metavar='nativeaot',
                             help='use Native AOT runtime for build or publish')
-        parser.add_argument('-g', '--hybrid-globalization',
-                            dest='hybridglobalization',
-                            metavar='hybridglobalization',
-                            help='use hybrid globalization for build or publish')
         parser.add_argument('--msbuild',
                             dest='msbuild',
                             metavar='msbuild',
@@ -202,7 +198,7 @@ class PreCommands:
         self.project = CSharpProject(csproj, const.BINDIR)
         self._updateframework(csproj.file_name)
 
-    def execute(self, build_args: List[str] = []):
+    def execute(self, build_args: list[str] = []):
         'Parses args and runs precommands'
         if self.operation == DEFAULT:
             pass
@@ -218,8 +214,6 @@ class PreCommands:
             if self.nativeaot:
                 build_args.append('/p:PublishAot=true')
                 build_args.append('/p:PublishAotUsingRuntimePack=true')
-            if self.hybridglobalization:
-                build_args.append('/p:HybridGlobalization=true')
             build_args.append("/p:EnableWindowsTargeting=true")
             self._publish(configuration=self.configuration, runtime_identifier=self.runtime_identifier, framework=self.framework, output=self.output, build_args=build_args)
         if self.operation == CROSSGEN:
@@ -278,12 +272,17 @@ class PreCommands:
             staticpath = os.path.join(helixpayload(), "staticdeps")
         shutil.copyfile(os.path.join(staticpath, f"PerfLab.{language_file_extension}"), os.path.join(projpath, f"PerfLab.{language_file_extension}"))
 
-    def install_workload(self, workloadid: str, install_args: List[str] = ["--skip-manifest-update"]):
+    def install_workload(self, workloadid: str, install_args: list[str] = ["--skip-manifest-update"]):
         'Installs the workload, if needed'
         if not self.has_workload:
             if self.readonly_dotnet:
                 raise Exception('workload needed to build, but has_workload=false, and readonly_dotnet=true')
-            subprocess.run(["dotnet", "workload", "install", workloadid] + install_args, check=True)
+            try:
+                subprocess.run(["dotnet", "workload", "install", workloadid] + install_args, check=True)
+                getLogger().info(f"Successfully installed workload {workloadid}")
+            except Exception as e:
+                getLogger().error(f"Error installing workload {workloadid}: {e}")
+                raise
 
     def uninstall_workload(self, workloadid: str):
         'Uninstalls the workload, if possible'
@@ -306,7 +305,7 @@ class PreCommands:
 
 
     def get_packages_for_sdk_from_feed(self, sdk_name: str, feed: str):
-        'Gets the packages for the given sdk from the given feed'
+        'Gets the packages for the given sdk from the given feed and returns parsed package list'
 
         getLogger().debug(f"dotnet package search {sdk_name} --prerelease --take 999 --format json --source {feed}")
 
@@ -315,9 +314,32 @@ class PreCommands:
             ["dotnet", "package", "search", sdk_name, "--prerelease", "--take", "999", "--format", "json", "--source", feed], check=True, capture_output=True, text=True)
         
         if result.returncode != 0:
+            getLogger().error(f"Package search command failed: {result.stderr}")
             raise Exception(f"Error querying package feed: {result.stderr}")
         
-        return result.stdout
+        getLogger().debug(f"Raw packages response for {sdk_name}: {result.stdout}")
+        
+        try:
+            parsed_response = json.loads(result.stdout)
+            getLogger().debug(f"Parsed JSON response for {sdk_name}: {parsed_response}")
+            
+            if not parsed_response.get("searchResult") or len(parsed_response["searchResult"]) == 0:
+                getLogger().error(f"No search results found for {sdk_name} in feed {feed}")
+                raise Exception(f"No search results found for {sdk_name} in feed {feed}")
+                
+            packages = parsed_response["searchResult"][0].get('packages', [])
+            getLogger().info(f"Found {len(packages)} total packages for {sdk_name}")
+            
+            if not packages:
+                getLogger().error(f"No packages found for SDK {sdk_name} in feed {feed}")
+                raise Exception(f"No packages found for SDK {sdk_name} in feed {feed}")
+                
+            return packages
+            
+        except json.JSONDecodeError as e:
+            getLogger().error(f"Failed to parse JSON response for {sdk_name}: {e}")
+            getLogger().debug(f"Raw response that failed to parse: {result.stdout}")
+            raise Exception(f"Error parsing JSON output for {sdk_name}: {e}")
 
     def _addstaticmsbuildproperty(self, projectfile: str):
         'Insert static msbuild property in the specified project file'
@@ -343,7 +365,7 @@ class PreCommands:
             else:
                 replace_line(projectfile, r'<TargetFramework>.*?</TargetFramework>', f'<TargetFramework>{self.framework}</TargetFramework>')
 
-    def _publish(self, configuration: str, framework: str, runtime_identifier: Optional[str] = None, output: Optional[str] = None, build_args: List[str] = []):
+    def _publish(self, configuration: str, framework: str, runtime_identifier: Optional[str] = None, output: Optional[str] = None, build_args: list[str] = []):
         self.project.publish(configuration,
                              output or const.PUBDIR,
                              True,
@@ -354,12 +376,12 @@ class PreCommands:
                              *['-bl:%s' % self.binlog] if self.binlog else [],
                              *build_args)
 
-    def _restore(self, restore_args: List[str] = ["/p:EnableWindowsTargeting=true"]):
+    def _restore(self, restore_args: list[str] = ["/p:EnableWindowsTargeting=true"]):
         self.project.restore(packages_path=get_packages_directory(),
                              verbose=True,
                              args=(['-bl:%s-restore.binlog' % self.binlog] if self.binlog else []) + restore_args)
 
-    def _build(self, configuration: str, framework: str, output: Optional[str] = None, build_args: List[str] = []):
+    def _build(self, configuration: str, framework: str, output: Optional[str] = None, build_args: list[str] = []):
         self.project.build(configuration,
                            True,
                            get_packages_directory(),

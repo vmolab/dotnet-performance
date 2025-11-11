@@ -1,5 +1,3 @@
-#pragma warning disable SYSLIB5003
-
 using System;
 using System.Numerics;
 using System.Runtime.Intrinsics;
@@ -29,13 +27,11 @@ namespace SveBenchmarks
         public int Size;
 
         private byte[] _array;
-        private ulong _length;
 
         [GlobalSetup]
         public virtual void Setup()
         {
             _array = ValuesGenerator.Array<byte>(Size + 1);
-            _length = 0;
 
             var random = new Random();
             for (int i = 0; i < _array.Length; i++)
@@ -56,19 +52,13 @@ namespace SveBenchmarks
         {
             fixed (byte* arr_ptr = _array)
             {
-                if (arr_ptr == null)
-                    return 0;
-
-                byte* ptr = arr_ptr;
-
-                while (*ptr != 0)
+                ulong i = 0;
+                while (arr_ptr[i] != 0)
                 {
-                    _length++;
-                    ptr++;
+                    i++;
                 }
+                return i;
             }
-
-            return _length;
         }
 
         [Benchmark]
@@ -124,39 +114,33 @@ namespace SveBenchmarks
         [Benchmark]
         public unsafe ulong SveStrLen()
         {
-            if (Sve.IsSupported)
+            Vector<byte> ptrue = Sve.CreateTrueMaskByte();
+            Vector<byte> cmp, data;
+
+            ulong i = 0;
+            ulong elemsInVector = Sve.Count8BitElements();
+
+            Vector<byte> pLoop = (Vector<byte>)Sve.CreateWhileLessThanMask8Bit((int)i, Size);
+
+            fixed (byte* arr_ptr = _array)
             {
-                Vector<byte> ptrue = Sve.CreateTrueMaskByte();
-                Vector<byte> cmp, data;
-
-                ulong i = 0;
-                ulong elemsInVector = Sve.Count8BitElements();
-
-                Vector<byte> pLoop = (Vector<byte>)Sve.CreateWhileLessThanMask8Bit((int)i, Size);
-
-                fixed (byte* arr_ptr = _array)
+                while (true)
                 {
-                    while (true)
+                    data = Sve.LoadVector(pLoop, arr_ptr + i);
+                    cmp = Sve.CompareEqual(data, Vector<byte>.Zero);
+
+                    if (Sve.TestAnyTrue(ptrue, cmp))
+                        break;
+                    else
                     {
-                        data = Sve.LoadVector(pLoop, arr_ptr + i);
-                        cmp = Sve.CompareEqual(data, Vector<byte>.Zero);
-
-                        if (Sve.TestAnyTrue(ptrue, cmp))
-                            break;
-                        else
-                        {
-                            i += elemsInVector;
-                            pLoop = (Vector<byte>)Sve.CreateWhileLessThanMask8Bit((int)i, Size);
-                        }
+                        i += elemsInVector;
+                        pLoop = (Vector<byte>)Sve.CreateWhileLessThanMask8Bit((int)i, Size);
                     }
-
-                    i += Sve.GetActiveElementCount(pLoop, data);
-                    return i;
                 }
+
+                i += Sve.GetActiveElementCount(pLoop, data);
+                return i;
             }
-            return 0;
         }
     }
 }
-
-#pragma warning restore SYSLIB5003

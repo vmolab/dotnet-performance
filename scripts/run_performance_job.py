@@ -12,7 +12,7 @@ import tempfile
 from traceback import format_exc
 import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from build_runtime_payload import *
 import ci_setup
@@ -20,7 +20,7 @@ from performance.common import RunCommand, set_environment_variable
 from performance.logger import setup_loggers
 from send_to_helix import PerfSendToHelixArgs, perf_send_to_helix
 
-def output_counters_for_crank(reports: List[Any]):
+def output_counters_for_crank(reports: list[Any]):
     print("#StartJobStatistics")
 
     statistics: dict[str, list[Any]] = {
@@ -92,7 +92,7 @@ class RunPerformanceJobArgs:
     linking_type: str = "dynamic"
     runtime_type: str = "coreclr"
     affinity: Optional[str] = "0"
-    run_env_vars: Dict[str, str] = field(default_factory=dict) # type: ignore
+    run_env_vars: dict[str, str] = field(default_factory=dict[str, str])
     is_scenario: bool = False
     runtime_flavor: Optional[str] = None
     local_build: bool = False
@@ -100,7 +100,6 @@ class RunPerformanceJobArgs:
     only_sanity_check: bool = False
     ios_llvm_build: bool = False
     ios_strip_symbols: bool = False
-    hybrid_globalization: bool = False
     javascript_engine: str = "NoJS"
     send_to_helix: bool = False
     channel: Optional[str] = None
@@ -172,6 +171,7 @@ def get_pre_commands(
             f"python -m pip install urllib3==1.26.19",
             f"python -m pip install opentelemetry-api==1.23.0",
             f"python -m pip install opentelemetry-sdk==1.23.0",
+            f"python -m pip install six==1.17.0",
         ]
 
         # Install prereqs for NodeJS https://github.com/dotnet/runtime/pull/40667 
@@ -265,11 +265,14 @@ def get_pre_commands(
         
     return helix_pre_commands
 
-def get_post_commands(os_group: str, runtime_type: str):
+def get_post_commands(os_group: str, internal: bool, runtime_type: str):
     if os_group == "windows":
         helix_post_commands = ["set PYTHONPATH=%ORIGPYPATH%"]
     else:
         helix_post_commands = ["export PYTHONPATH=$ORIGPYPATH"]
+
+    if internal:
+        helix_post_commands += ["deactivate"] # deactivate venv
 
     if runtime_type == "wasm" and os_group != "windows":
         helix_post_commands += [
@@ -332,8 +335,7 @@ def get_bdn_arguments(
         javascript_engine_path: Optional[str] = None,
         product_version: Optional[str] = None,
         corerun_payload_dir: Optional[str] = None,
-        extra_bdn_args: Optional[str] = None):
-    
+        extra_bdn_args: Optional[str] = None) -> list[str]:
     bdn_arguments = ["--anyCategories", run_categories]
 
     if affinity is not None and not "0":
@@ -380,6 +382,7 @@ def get_bdn_arguments(
         if javascript_engine == "v8":
             wasm_args += ["--module"]
 
+        assert javascript_engine_path is not None
         bdn_arguments += [
             "--wasmEngine", javascript_engine_path,
             f"\\\"--wasmArgs={' '.join(wasm_args)}\\\"",
@@ -426,7 +429,6 @@ def get_run_configurations(
         pgo_run_type: Optional[str] = None,
         physical_promotion_run_type: Optional[str] = None,
         r2r_run_type: Optional[str] = None,
-        hybrid_globalization: bool = False,
         experiment_name: Optional[str] = None,
         linking_type: Optional[str] = None,
         runtime_flavor: Optional[str] = None,
@@ -459,9 +461,6 @@ def get_run_configurations(
 
     if r2r_run_type == "nor2r":
         configurations["R2RType"] = "nor2r"
-
-    if hybrid_globalization:
-        configurations["HybridGlobalization"] = "True"
 
     if experiment_name is not None:
         configurations["ExperimentName"] = experiment_name
@@ -521,7 +520,7 @@ def get_work_item_command(os_group: str, target_csproj: str, architecture: str, 
     if internal:
         work_item_command += ["--upload-to-perflab-container"]
 
-    if perf_lab_framework != "net462":
+    if perf_lab_framework != "net472":
         if os_group == "windows":
             work_item_command += ["--dotnet-versions", "%DOTNET_VERSION%"]
         else:
@@ -581,6 +580,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
         args.libraries_download_dir = os.path.join(args.runtime_repo_dir, "artifacts")
     
     ios_mono = args.runtime_type == "iOSMono"
+    ios_coreclr = args.runtime_type == "iOSCoreCLR"
     ios_nativeaot = args.runtime_type == "iOSNativeAOT"
     is_aot = args.codegen_type.lower() == "aot"
     is_mono = args.runtime_type == "mono"
@@ -641,6 +641,8 @@ def run_performance_job(args: RunPerformanceJobArgs):
     if args.run_kind == "ios_scenarios":
         if args.runtime_type == "iOSMono":
             args.runtime_flavor = "mono"
+        elif args.runtime_type == "iOSCoreCLR":
+            args.runtime_flavor = "coreclr"
         elif args.runtime_type == "iOSNativeAOT":
             args.runtime_flavor = "coreclr"
         else:
@@ -653,7 +655,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
 
     configurations = get_run_configurations(
         args.run_kind, args.runtime_type, args.codegen_type, args.pgo_run_type, args.physical_promotion_run_type,
-        args.r2r_run_type, args.hybrid_globalization, args.experiment_name, args.linking_type,
+        args.r2r_run_type, args.experiment_name, args.linking_type,
         args.runtime_flavor, args.ios_llvm_build, args.ios_strip_symbols, args.javascript_engine
     )
 
@@ -675,8 +677,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
 
         if args.use_local_commit_time:
             get_commit_time_command = RunCommand(["git", "show", "-s", "--format=%ci", args.perf_repo_hash], verbose=True)
-            get_commit_time_command.run(args.runtime_repo_dir)
-            ci_setup_arguments.commit_time = f"{get_commit_time_command.stdout.strip()}"
+            ci_setup_arguments.commit_time = get_commit_time_command.run_and_get_stdout(args.runtime_repo_dir).strip()
 
     # not_in_lab should stay False for internal dotnet performance CI runs
     if not args.internal and not args.performance_repo_ci:
@@ -846,7 +847,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
             # shutil.copy(os.path.join(args.built_app_dir, "MonoBenchmarksDroid.apk"), os.path.join(root_payload_dir, "MonoBenchmarksDroid.apk"))
         ci_setup_arguments.architecture = "arm64"
 
-    if ios_mono or ios_nativeaot:
+    if ios_mono or ios_coreclr or ios_nativeaot:
         if args.built_app_dir is None:
             raise Exception("Built apps directory must be present for IOS Mono or IOS Native AOT benchmarks")
         
@@ -884,7 +885,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
         agent_python = "python3"
 
     helix_pre_commands = get_pre_commands(args.os_group, args.internal, args.runtime_type, args.codegen_type, v8_version)
-    helix_post_commands = get_post_commands(args.os_group, args.runtime_type)
+    helix_post_commands = get_post_commands(args.os_group, args.internal, args.runtime_type)
 
     ci_setup_arguments.local_build = args.local_build
 
@@ -936,7 +937,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
     dotnet_executable_path = os.path.join(ci_setup_arguments.dotnet_path or ci_setup_arguments.install_dir, "dotnet")
     ci_artifacts_log_dir = os.path.join(args.performance_repo_dir, 'artifacts', 'log', build_config)
 
-    def publish_dotnet_app_to_payload(payload_dir_name, csproj_path, self_contained=True):
+    def publish_dotnet_app_to_payload(payload_dir_name: str, csproj_path: str, self_contained: bool = True):
         RunCommand([
             dotnet_executable_path, "publish", 
             "-c", "Release", 
@@ -1004,7 +1005,6 @@ def run_performance_job(args: RunPerformanceJobArgs):
             os.environ["Python"] = agent_python
             os.environ["RuntimeFlavor"] = args.runtime_flavor or ''
             os.environ["CodegenType"] = args.codegen_type or ''
-            os.environ["HybridGlobalization"] = str(args.hybrid_globalization)
 
             # TODO: See if these commands are needed for linux as they were being called before but were failing.
             if args.os_group == "windows" or args.os_group == "osx":
@@ -1150,7 +1150,6 @@ def run_performance_job(args: RunPerformanceJobArgs):
         runtime_flavor=args.runtime_flavor or "",
         codegen_type=args.codegen_type or "",
         linking_type=args.linking_type or "",
-        hybrid_globalization=args.hybrid_globalization,
         target_csproj=args.target_csproj,
         work_item_command=work_item_command or None,
         baseline_work_item_command=baseline_work_item_command or None,
@@ -1185,7 +1184,7 @@ def run_performance_job(args: RunPerformanceJobArgs):
 
         
 
-def main(argv: List[str]):
+def main(argv: list[str]):
     setup_loggers(verbose=True)
 
     try:
@@ -1202,7 +1201,6 @@ def main(argv: List[str]):
                 "--compare": "compare",
                 "--ios-llvm-build": "ios_llvm_build",
                 "--ios-strip-symbols": "ios_strip_symbols",
-                "--hybrid-globalization": "hybrid_globalization",
                 "--send-to-helix": "send_to_helix",
                 "--performance-repo-ci": "performance_repo_ci",
                 "--only-sanity": "only_sanity_check",

@@ -2,6 +2,7 @@
 
   <Import Project="Scenarios.Common.props" />
 
+
   <ItemGroup>
       <Framework Include="netcoreapp2.1" FrameworkName="%(Identity)"/>
       <Framework Include="netcoreapp3.0" FrameworkName="%(Identity)" Condition="'$(FrameworkVersion)' &gt; '2.1'"/>
@@ -37,7 +38,7 @@
       <ScenarioDirectoryName>emptyfsconsoletemplate</ScenarioDirectoryName>
       <PayloadDirectory>$(ScenariosDir)%(ScenarioDirectoryName)</PayloadDirectory>
     </SDKWorkItem>
-    <SDKWorkItem Include="F# Compiler Service">
+    <SDKWorkItem Include="F# Compiler Service" Condition="$(Architecture) != 'x86'"> <!-- Don't run on x86 as we are hitting OOM exceptions on Viper machines https://github.com/dotnet/performance/issues/4971 -->
       <ScenarioDirectoryName>fsharpcompilerservice</ScenarioDirectoryName>
       <PayloadDirectory>$(ScenariosDir)%(ScenarioDirectoryName)</PayloadDirectory>
     </SDKWorkItem>
@@ -168,7 +169,9 @@
       <Command>$(Python) test.py innerloopmsbuild --scenario-name &quot;%(Identity)&quot; $(ScenarioArgs)</Command>
       <PostCommands>$(Python) post.py</PostCommands>
     </HelixWorkItem>
-    <HelixWorkItem Include="Inner Loop Blazor Client">
+    <!-- Inner Loop Blazor Client: gated to internal (SYSTEM_TEAMPROJECT=internal) by default due to higher resource usage.
+      Override with /p:IncludeVMFlakyScenarios=true to include elsewhere. -->
+    <HelixWorkItem Include="Inner Loop Blazor Client" Condition="'$(SYSTEM_TEAMPROJECT)' == 'internal' OR '$(IncludeVMFlakyScenarios)' == 'true'">
       <ScenarioDirectoryName>blazorwasminnerloop</ScenarioDirectoryName>
       <PayloadDirectory>$(ScenariosDir)%(ScenarioDirectoryName)</PayloadDirectory>
       <PreCommands>$(Python) pre.py default -f $(PERFLAB_Framework)</PreCommands>
